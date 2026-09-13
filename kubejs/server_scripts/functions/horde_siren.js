@@ -72,6 +72,7 @@ function sirenJsonText(text) {
 
 // Служебные подробности — только тому, кто спросил (оператору), не в общий чат
 function sirenReply(server, name, text) {
+	console.info(text)
 	server.runCommandSilent(`tellraw ${name} {"text":"${sirenJsonText(text)}","color":"gray"}`)
 }
 
@@ -96,8 +97,13 @@ function sirenBroadcastThreat(server) {
 
 // Оставшиеся тики орды игрока (поле timer приватное, есть только в toString)
 function sirenTicksLeft(ev) {
-	let m = String(ev.toString('')).match(/ticksLeft=(\d+)/)
-	return m ? Number(m[1]) : -1
+	try {
+		let m = String(ev.toString('')).match(/ticksLeft=(\d+)/)
+		return m ? Number(m[1]) : -1
+	} catch (e) {
+		// не валим тик (музыку/синхронизацию) из-за угроз
+		return -2
+	}
 }
 
 // Останавливаем только свои треки по id — остальные звуки категории (зомби) не трогаем
@@ -171,7 +177,7 @@ function sirenCheck(srv, replyTo) {
 			}
 		}
 		if (dryRun) {
-			let left = active ? sirenTicksLeft(ev) : 0
+			let left = sirenTicksLeft(ev)
 			sirenReply(srv, replyTo, `horde_siren status: ${name} active=${active} ticksLeft=${left} wave=${sirenWaves[name] || 0} nextDay=${nextDay}${wantNext != nextDay ? ' -> ' + wantNext : ''} hordeDay=${ev.isHordeDay(p)} lastSirenDay=${pd.getInt('hordeSiren_' + name)} music=${sirenMusic[name] ? 'да' : 'нет'}`)
 			return
 		}
