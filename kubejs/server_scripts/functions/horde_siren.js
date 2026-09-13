@@ -15,6 +15,9 @@ const SirenHordeSavedData = Java.loadClass('net.smileycorp.hordes.hordeevent.cap
 const SIREN_DAY_LENGTH = 24000
 const SIREN_FROM = 12800          // hordeStartTime (13000) - 200
 const SIREN_TO = 13000
+// Категория звука: не music/record — многие играют с выключенной музыкой.
+// hostile («Враждебные существа») почти никто не глушит, и вой орды уже в ней.
+const SIREN_MUSIC_CATEGORY = 'hostile'
 // Длительность в тиках (+2 с запаса), чтобы следующий трек не наезжал на текущий
 const SIREN_TRACKS = [
 	{ id: 'deceasedhorde:horde.music.smaragdove_nebo', ticks: 3740 + 40 },
@@ -30,16 +33,21 @@ function sirenCmd(server, name, cmd) {
 	server.runCommandSilent(`execute as ${name} at @s run ${cmd}`)
 }
 
+// Останавливаем только свои треки по id — остальные звуки категории (зомби) не трогаем
+function sirenStopTracks(server, name) {
+	SIREN_TRACKS.forEach(t => sirenCmd(server, name, `stopsound @s ${SIREN_MUSIC_CATEGORY} ${t.id}`))
+}
+
 function sirenPlayTrack(server, name, index) {
 	let track = SIREN_TRACKS[index]
-	sirenCmd(server, name, 'stopsound @s record')
-	sirenCmd(server, name, `playsound ${track.id} record @s ~ ~ ~ 1 1`)
+	sirenStopTracks(server, name)
+	sirenCmd(server, name, `playsound ${track.id} ${SIREN_MUSIC_CATEGORY} @s ~ ~ ~ 1 1`)
 	sirenMusic[name] = { track: index, endsAt: sirenTicks + track.ticks }
 }
 
 function sirenStopMusic(server, name) {
 	if (!sirenMusic[name]) return
-	sirenCmd(server, name, 'stopsound @s record')
+	sirenStopTracks(server, name)
 	delete sirenMusic[name]
 }
 
@@ -113,7 +121,7 @@ ServerEvents.commandRegistry(event => {
 		// Выключить музыку себе
 		.then(Commands.literal('stop').executes(ctx => {
 			let name = ctx.source.player.username
-			sirenCmd(Utils.server, name, 'stopsound @s record')
+			sirenStopTracks(Utils.server, name)
 			delete sirenMusic[name]
 			return 1
 		}))
