@@ -175,9 +175,30 @@ function raidGiveRadio(srv, name) {
 	srv.runCommandSilent(`give ${name} apocalypsenow:military_radio{airstrike:1b,display:{Name:'{"text":"Рация авиаудара","color":"red","italic":false}',Lore:['{"text":"ПКМ в воздух — авиаудар в 50 блоках по взгляду","color":"gray","italic":false}','{"text":"Через 30 секунд. Базу не бомбят.","color":"dark_gray","italic":false}']}} 1`)
 }
 
+// Рация авиаудара = military_radio с NBT airstrike. item.nbt в Rhino — обёртка CompoundTag (NativeJavaMap),
+// её String() не равен SNBT, поэтому проверяем несколькими способами.
+function raidIsRadio(item) {
+	if (item == null || String(item.id) != 'apocalypsenow:military_radio') return false
+	let nbt = item.nbt
+	if (nbt == null) return false
+	try { if (nbt.airstrike) return true } catch (e) { }
+	try { if (nbt.contains && nbt.contains('airstrike')) return true } catch (e) { }
+	return String(nbt).indexOf('airstrike') >= 0
+}
+
+function raidDescribeItem(item) {
+	let nbt = item == null ? null : item.nbt
+	let parts = [`id=${item == null ? null : item.id}`, `nbtType=${typeof nbt}`, `nbtStr=${String(nbt)}`]
+	try { parts.push(`nbt.airstrike=${nbt.airstrike}`) } catch (e) { parts.push('nbt.airstrike ERR ' + e) }
+	try { parts.push(`contains=${nbt.contains('airstrike')}`) } catch (e) { parts.push('contains ERR ' + e) }
+	parts.push(`isRadio=${raidIsRadio(item)}`)
+	return parts.join(' | ')
+}
+
 ItemEvents.rightClicked(event => {
-	if (event.item.id != 'apocalypsenow:military_radio') return
-	if (String(event.item.nbt).indexOf('airstrike:1b') < 0) return
+	if (String(event.item.id) != 'apocalypsenow:military_radio') return
+	console.info('air_raid radio click: ' + event.player.username + ' ' + raidDescribeItem(event.item))
+	if (!raidIsRadio(event.item)) return
 	let srv = event.server
 	let name = event.player.username
 	event.cancel()
@@ -222,6 +243,12 @@ ServerEvents.commandRegistry(event => {
 		// предпросмотр налёта по взгляду: дым вместо TNT, расчёт только себе
 		.then(Commands.literal('preview').executes(ctx => {
 			raidPreview(Utils.server, ctx.source.player.username)
+			return 1
+		}))
+		// диагностика: как скрипт видит предмет в главной руке (в лог)
+		.then(Commands.literal('debugitem').executes(ctx => {
+			let p = ctx.source.player
+			console.info('air_raid debugitem: ' + p.username + ' ' + raidDescribeItem(p.mainHandItem))
 			return 1
 		}))
 		// выдать рацию авиаудара
