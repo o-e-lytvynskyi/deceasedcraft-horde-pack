@@ -1,20 +1,27 @@
 // priority: 0
 console.info('Loaded horde_siren.js')
 
-// Сирена перед ночью орды и музыка, которая играет, пока у игрока идёт орда.
+// Сирена перед ночью орды, музыка во время орды и синхронизация орды между игроками.
 // Треки — из серверного ресурспака deceasedcraft-horde-pack (namespace deceasedhorde).
 //
-// День орды определяется ПО ИГРОКУ: HordeEvent.isHordeDay(player) / isActive(player).
-// HordeSavedData.getNextDay() в день орды уже сдвинут на +hordeSpawnDays, сравнивать его с днём нельзя.
+// Как устроен The Hordes (1.5.4c, hordeEventByPlayerTime = false):
+// - общий график — HordeSavedData.next_day; сдвигается на +hordeSpawnDays в ПЕРВОМ тике дня орды;
+// - у каждого игрока свой HordeEvent со своим nextDay; орда стартует у игрока, если он в верхнем мире,
+//   время суток в [hordeStartTime, hordeStartTime + hordeStartBuffer] и день мира >= его nextDay;
+// - при входе (setPlayer) nextDay пересчитывается от общего next_day — зашедший в день орды
+//   получает nextDay = день + 15 и сегодняшнюю орду пропускает. Отсюда рассинхрон.
+// Синхронизация: в день орды до конца окна старта всем онлайн ставим nextDay = сегодня,
+// в остальные дни — nextDay = общий next_day (отменяет «зависшие» орды в неурочные ночи).
+// Считаем, что hordeSpawnVariation = 0 (как в паке), иначе день орды по next_day не вычислить.
 //
 // Грабли Rhino на этом сервере: нет Math.PI; getGameTime()/getUUID() не маппятся;
 // const внутри многократно вызываемых функций падает; все server_scripts делят одну область имён.
 // Откат: удалить файл и /reload.
 const SirenHordeSavedData = Java.loadClass('net.smileycorp.hordes.hordeevent.capability.HordeSavedData')
+const SirenHordeConfig = Java.loadClass('net.smileycorp.hordes.config.HordeEventConfig')
 
 const SIREN_DAY_LENGTH = 24000
-const SIREN_FROM = 12800          // hordeStartTime (13000) - 200
-const SIREN_TO = 13000
+const SIREN_LEAD_TICKS = 200       // сирена за 10 с до старта орды
 // Категория звука: не music/record — многие играют с выключенной музыкой.
 // hostile («Враждебные существа») почти никто не глушит, и вой орды уже в ней.
 const SIREN_MUSIC_CATEGORY = 'hostile'
@@ -63,11 +70,20 @@ function sirenCheck(srv, dryRun) {
 	let level = srv.overworld()
 	let time = level.getDayTime()
 	let tod = time % SIREN_DAY_LENGTH
-	let inWindow = tod >= SIREN_FROM && tod < SIREN_TO
 	let day = Math.floor(time / SIREN_DAY_LENGTH)
 	let data = SirenHordeSavedData.getData(level)
 	let pd = srv.persistentData
+
+	let spawnDays = Number(SirenHordeConfig.hordeSpawnDays.get())
+	let startTime = Number(SirenHordeConfig.hordeStartTime.get())
+	let startEnd = startTime + Number(SirenHordeConfig.hordeStartBuffer.get())
+	let globalNext = data.getNextDay()
+	// next_day уже сдвинут в первом тике дня орды, поэтому сегодня орда, если день = next_day - интервал
+	let hordeToday = day == globalNext - spawnDays
+	let inWindow = hordeToday && tod >= startTime - SIREN_LEAD_TICKS && tod < startTime
 	let online = {}
+
+	if (dryRun) srv.tell(Text.gray(`horde_siren status: day=${day} tod=${tod} next_day=${globalNext} hordeToday=${hordeToday} sirenWindow=${inWindow}`))
 
 	srv.players.forEach(p => {
 		let name = p.username
@@ -79,17 +95,31 @@ function sirenCheck(srv, dryRun) {
 			return
 		}
 		let active = ev.isActive(p)
-		let hordeDay = ev.isHordeDay(p)
-		// Ключ по нику, в server.persistentData: сирена не повторится в тот же день после смерти/релога/reload
-		let sKey = 'hordeSiren_' + name
-		let lastDay = pd.getInt(sKey)
+		let nextDay = ev.getNextDay()
+
+		// 0) Синхронизация личного nextDay с общим графиком
+		let wantNext = nextDay
+		if (!active) {
+			if (hordeToday) {
+				// до конца окна старта: сегодняшняя орда должна случиться у всех онлайн
+				if (tod < startEnd && nextDay > day) wantNext = day
+			} else if (nextDay != globalNext) {
+				wantNext = globalNext
+			}
+		}
 		if (dryRun) {
-			srv.tell(Text.gray(`horde_siren status: ${name} day=${day} tod=${tod} window=${inWindow} active=${active} hordeDay=${hordeDay} lastSirenDay=${lastDay} music=${sirenMusic[name] ? 'да' : 'нет'}`))
+			let sKey0 = 'hordeSiren_' + name
+			srv.tell(Text.gray(`horde_siren status: ${name} active=${active} nextDay=${nextDay}${wantNext != nextDay ? ' -> ' + wantNext : ''} hordeDay=${ev.isHordeDay(p)} lastSirenDay=${pd.getInt(sKey0)} music=${sirenMusic[name] ? 'да' : 'нет'}`))
 			return
+		}
+		if (wantNext != nextDay) {
+			ev.setNextDay(wantNext)
+			console.info(`horde_siren: ${name} nextDay ${nextDay} -> ${wantNext} (day=${day}, next_day=${globalNext})`)
 		}
 
 		// 1) Сирена + первый трек: у игрока день орды, орда вот-вот начнётся
-		if (inWindow && !active && hordeDay && lastDay != day) {
+		let sKey = 'hordeSiren_' + name
+		if (inWindow && !active && ev.isHordeDay(p) && pd.getInt(sKey) != day) {
 			pd.putInt(sKey, day)
 			hordeSiren(srv, name)
 			return
@@ -100,7 +130,7 @@ function sirenCheck(srv, dryRun) {
 			// 2) Орда идёт: трек кончился (или игрок зашёл посреди орды) — следующий
 			if (!music) sirenPlayTrack(srv, name, Math.floor(Math.random() * SIREN_TRACKS.length) % SIREN_TRACKS.length)
 			else if (sirenTicks >= music.endsAt) sirenPlayTrack(srv, name, (music.track + 1) % SIREN_TRACKS.length)
-		} else if (music && !(inWindow && hordeDay)) {
+		} else if (music && !inWindow) {
 			// 3) Орда кончилась — выключить музыку (окно сирены не трогаем: там орда ещё не стартовала)
 			sirenStopMusic(srv, name)
 		}
@@ -125,7 +155,7 @@ ServerEvents.commandRegistry(event => {
 			delete sirenMusic[name]
 			return 1
 		}))
-		// Диагностика: что решил бы тик для каждого игрока (пишет в общий чат и latest.log)
+		// Диагностика: график орды и что решил бы тик для каждого игрока (в общий чат и latest.log)
 		.then(Commands.literal('status').executes(ctx => {
 			try {
 				sirenCheck(Utils.server, true)
