@@ -1,7 +1,7 @@
 // priority: 0
 console.info('Loaded horde_siren.js')
 
-// Сирена перед ночью орды, музыка во время орды и синхронизация орды между игроками.
+// Сирена перед ночью орды, музыка и угрозы во время орды, синхронизация орды между игроками.
 // Треки — из серверного ресурспака deceasedcraft-horde-pack (namespace deceasedhorde).
 //
 // Как устроен The Hordes (1.5.4c, hordeEventByPlayerTime = false):
@@ -10,9 +10,11 @@ console.info('Loaded horde_siren.js')
 //   время суток в [hordeStartTime, hordeStartTime + hordeStartBuffer] и день мира >= его nextDay;
 // - при входе (setPlayer) nextDay пересчитывается от общего next_day — зашедший в день орды
 //   получает nextDay = день + 15 и сегодняшнюю орду пропускает. Отсюда рассинхрон.
+// - волна идёт, когда timer % spawnInterval == 0 (timer = оставшиеся тики, стартует с hordeSpawnDuration);
+//   timer доступен только через HordeEvent.toString(String) — «ticksLeft=N».
 // Синхронизация: в день орды до конца окна старта всем онлайн ставим nextDay = сегодня,
 // в остальные дни — nextDay = общий next_day (отменяет «зависшие» орды в неурочные ночи).
-// Считаем, что hordeSpawnVariation = 0 (как в паке), иначе день орды по next_day не вычислить.
+// Считаем, что hordeSpawnVariation = 0 и скрипты орды не меняют длительность/интервал (как в паке).
 //
 // Грабли Rhino на этом сервере: нет Math.PI; getGameTime()/getUUID() не маппятся;
 // const внутри многократно вызываемых функций падает; все server_scripts делят одну область имён.
@@ -30,14 +32,72 @@ const SIREN_TRACKS = [
 	{ id: 'deceasedhorde:horde.music.smaragdove_nebo', ticks: 3740 + 40 },
 	{ id: 'deceasedhorde:horde.music.plyashka_fragolino', ticks: 4260 + 40 }
 ]
+// Угрозы в общий чат: по одной на волну, без повторов, пока не пройдут все.
+// Без двойных кавычек и обратных слэшей — строка вставляется в JSON tellraw.
+const SIREN_THREATS = [
+	'Вы уже мертвы. Просто ещё не легли.',
+	'Мы чуем вашу кровь. Ни одна дверь вас не спасёт.',
+	'Этой ночью мы вырвем вам глотки и сожрём вас ещё тёплыми.',
+	'Бегите. Так мясо вкуснее.',
+	'Ваши стены — картон. Патроны кончатся. Крики — нет.',
+	'К рассвету от вас останутся только кости и лужи.',
+	'Мы разорвём вас на куски и растащим по всему городу.',
+	'Прячьтесь сколько хотите. Мы выгрызем вас из любой щели.',
+	'Каждый выстрел зовёт нас. Стреляйте громче.',
+	'Ваши друзья уже с нами. Скоро и вы будете голодны.',
+	'Мы переломаем вам кости одну за другой, пока вы ещё дышите.',
+	'Никто не доживёт до утра. Никто.',
+	'Слышите хруст? Это ваша баррикада. Следующими будут ваши рёбра.',
+	'Мы выедим вам глаза, чтобы вы не видели, кто грызёт дальше.',
+	'Молитесь. Это не поможет, но нам нравится, как вы скулите.'
+]
+const SIREN_THREAT_DEDUP_TICKS = 200   // волны разных игроков в пределах 10 с — одна фраза
 
 let sirenTicks = 0
 let sirenFailed = false
 // ник -> { track: индекс, endsAt: sirenTicks }; живёт в памяти, после reload музыка стартует заново
 let sirenMusic = {}
+// ник -> номер последней объявленной волны
+let sirenWaves = {}
+let sirenThreatBag = []
+let sirenLastThreatTick = -100000
 
 function sirenCmd(server, name, cmd) {
 	server.runCommandSilent(`execute as ${name} at @s run ${cmd}`)
+}
+
+function sirenJsonText(text) {
+	return String(text).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+}
+
+// Служебные подробности — только тому, кто спросил (оператору), не в общий чат
+function sirenReply(server, name, text) {
+	server.runCommandSilent(`tellraw ${name} {"text":"${sirenJsonText(text)}","color":"gray"}`)
+}
+
+function sirenNextThreat() {
+	if (sirenThreatBag.length == 0) {
+		let bag = []
+		for (let i = 0; i < SIREN_THREATS.length; i++) bag.push(i)
+		for (let i = bag.length - 1; i > 0; i--) {
+			let j = Math.floor(Math.random() * (i + 1))
+			let t = bag[i]; bag[i] = bag[j]; bag[j] = t
+		}
+		sirenThreatBag = bag
+	}
+	return SIREN_THREATS[sirenThreatBag.pop()]
+}
+
+function sirenBroadcastThreat(server) {
+	if (sirenTicks - sirenLastThreatTick < SIREN_THREAT_DEDUP_TICKS) return
+	sirenLastThreatTick = sirenTicks
+	server.runCommandSilent(`tellraw @a {"text":"☠ ${sirenJsonText(sirenNextThreat())}","color":"dark_red","bold":true}`)
+}
+
+// Оставшиеся тики орды игрока (поле timer приватное, есть только в toString)
+function sirenTicksLeft(ev) {
+	let m = String(ev.toString('')).match(/ticksLeft=(\d+)/)
+	return m ? Number(m[1]) : -1
 }
 
 // Останавливаем только свои треки по id — остальные звуки категории (зомби) не трогаем
@@ -65,8 +125,9 @@ function hordeSiren(server, name) {
 	sirenPlayTrack(server, name, Math.floor(Math.random() * SIREN_TRACKS.length) % SIREN_TRACKS.length)
 }
 
-// Обход игроков. dryRun = только написать в чат, что решил бы тик (для /hordesiren status).
-function sirenCheck(srv, dryRun) {
+// Обход игроков. replyTo = ник оператора: только написать ему, что решил бы тик (/hordesiren status).
+function sirenCheck(srv, replyTo) {
+	let dryRun = !!replyTo
 	let level = srv.overworld()
 	let time = level.getDayTime()
 	let tod = time % SIREN_DAY_LENGTH
@@ -77,13 +138,15 @@ function sirenCheck(srv, dryRun) {
 	let spawnDays = Number(SirenHordeConfig.hordeSpawnDays.get())
 	let startTime = Number(SirenHordeConfig.hordeStartTime.get())
 	let startEnd = startTime + Number(SirenHordeConfig.hordeStartBuffer.get())
+	let duration = Number(SirenHordeConfig.hordeSpawnDuration.get())
+	let interval = Number(SirenHordeConfig.hordeSpawnInterval.get())
 	let globalNext = data.getNextDay()
 	// next_day уже сдвинут в первом тике дня орды, поэтому сегодня орда, если день = next_day - интервал
 	let hordeToday = day == globalNext - spawnDays
 	let inWindow = hordeToday && tod >= startTime - SIREN_LEAD_TICKS && tod < startTime
 	let online = {}
 
-	if (dryRun) srv.tell(Text.gray(`horde_siren status: day=${day} tod=${tod} next_day=${globalNext} hordeToday=${hordeToday} sirenWindow=${inWindow}`))
+	if (dryRun) sirenReply(srv, replyTo, `horde_siren status: day=${day} tod=${tod} next_day=${globalNext} hordeToday=${hordeToday} sirenWindow=${inWindow} threatsLeftInBag=${sirenThreatBag.length}`)
 
 	srv.players.forEach(p => {
 		let name = p.username
@@ -91,7 +154,7 @@ function sirenCheck(srv, dryRun) {
 		// getEvent перегружен (ServerPlayer / UUID) — передаём UUID, getUUID() не маппится
 		let ev = data.getEvent(p.profile.getId())
 		if (ev == null) {
-			if (dryRun) srv.tell(Text.gray(`horde_siren status: ${name} — нет HordeEvent`))
+			if (dryRun) sirenReply(srv, replyTo, `horde_siren status: ${name} — нет HordeEvent`)
 			return
 		}
 		let active = ev.isActive(p)
@@ -108,8 +171,8 @@ function sirenCheck(srv, dryRun) {
 			}
 		}
 		if (dryRun) {
-			let sKey0 = 'hordeSiren_' + name
-			srv.tell(Text.gray(`horde_siren status: ${name} active=${active} nextDay=${nextDay}${wantNext != nextDay ? ' -> ' + wantNext : ''} hordeDay=${ev.isHordeDay(p)} lastSirenDay=${pd.getInt(sKey0)} music=${sirenMusic[name] ? 'да' : 'нет'}`))
+			let left = active ? sirenTicksLeft(ev) : 0
+			sirenReply(srv, replyTo, `horde_siren status: ${name} active=${active} ticksLeft=${left} wave=${sirenWaves[name] || 0} nextDay=${nextDay}${wantNext != nextDay ? ' -> ' + wantNext : ''} hordeDay=${ev.isHordeDay(p)} lastSirenDay=${pd.getInt('hordeSiren_' + name)} music=${sirenMusic[name] ? 'да' : 'нет'}`)
 			return
 		}
 		if (wantNext != nextDay) {
@@ -130,14 +193,30 @@ function sirenCheck(srv, dryRun) {
 			// 2) Орда идёт: трек кончился (или игрок зашёл посреди орды) — следующий
 			if (!music) sirenPlayTrack(srv, name, Math.floor(Math.random() * SIREN_TRACKS.length) % SIREN_TRACKS.length)
 			else if (sirenTicks >= music.endsAt) sirenPlayTrack(srv, name, (music.track + 1) % SIREN_TRACKS.length)
-		} else if (music && !inWindow) {
-			// 3) Орда кончилась — выключить музыку (окно сирены не трогаем: там орда ещё не стартовала)
-			sirenStopMusic(srv, name)
+
+			// 3) Новая волна — угроза в общий чат (волны: timer = duration, duration - interval, ...)
+			let left = sirenTicksLeft(ev)
+			if (left > 0 && interval > 0) {
+				let wave = Math.floor((duration - left) / interval) + 1
+				if (wave > (sirenWaves[name] || 0)) {
+					sirenWaves[name] = wave
+					sirenBroadcastThreat(srv)
+				}
+			}
+		} else {
+			delete sirenWaves[name]
+			if (music && !inWindow) {
+				// 4) Орда кончилась — выключить музыку (окно сирены не трогаем: там орда ещё не стартовала)
+				sirenStopMusic(srv, name)
+			}
 		}
 	})
 
 	// Вышедшие игроки — забыть состояние
-	if (!dryRun) Object.keys(sirenMusic).forEach(n => { if (!online[n]) delete sirenMusic[n] })
+	if (!dryRun) {
+		Object.keys(sirenMusic).forEach(n => { if (!online[n]) delete sirenMusic[n] })
+		Object.keys(sirenWaves).forEach(n => { if (!online[n]) delete sirenWaves[n] })
+	}
 }
 
 ServerEvents.commandRegistry(event => {
@@ -155,12 +234,19 @@ ServerEvents.commandRegistry(event => {
 			delete sirenMusic[name]
 			return 1
 		}))
-		// Диагностика: график орды и что решил бы тик для каждого игрока (в общий чат и latest.log)
+		// Тест: следующая угроза только себе (в общий чат не уходит, колоду расходует)
+		.then(Commands.literal('threat').executes(ctx => {
+			let name = ctx.source.player.username
+			Utils.server.runCommandSilent(`tellraw ${name} {"text":"☠ ${sirenJsonText(sirenNextThreat())}","color":"dark_red","bold":true}`)
+			return 1
+		}))
+		// Диагностика: график орды и что решил бы тик — только вызвавшему
 		.then(Commands.literal('status').executes(ctx => {
+			let name = ctx.source.player.username
 			try {
-				sirenCheck(Utils.server, true)
+				sirenCheck(Utils.server, name)
 			} catch (e) {
-				Utils.server.tell(Text.red('horde_siren status: ' + e))
+				sirenReply(Utils.server, name, 'horde_siren status: ' + e)
 			}
 			return 1
 		})))
@@ -171,7 +257,7 @@ ServerEvents.tick(event => {
 	sirenTicks++
 	if (sirenTicks % 20 != 0) return
 	try {
-		sirenCheck(event.server, false)
+		sirenCheck(event.server, null)
 	} catch (e) {
 		// Одна ошибка — и тик отключается до следующего reload, чтобы не спамить лог
 		sirenFailed = true
