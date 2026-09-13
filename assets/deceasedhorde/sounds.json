@@ -1,0 +1,12 @@
+{
+  "horde.music.smaragdove_nebo": {
+    "sounds": [
+      { "name": "deceasedhorde:horde/smaragdove_nebo", "stream": true }
+    ]
+  },
+  "horde.music.plyashka_fragolino": {
+    "sounds": [
+      { "name": "deceasedhorde:horde/plyashka_fragolino", "stream": true }
+    ]
+  }
+}
