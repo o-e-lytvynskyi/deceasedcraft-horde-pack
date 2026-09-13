@@ -47,8 +47,9 @@ let raidTicks = 0
 let raidQueue = []                 // { at: raidTicks, cmd }
 let raidRadioUsed = {}             // ник -> raidTicks последнего вызова
 
+// Игрок в верхнем мире: селектор с distance ищет только в измерении исполнения (overworld)
 function raidOnlineOverworld(srv, name) {
-	return srv.runCommandSilent(`execute as ${name} at @s if dimension minecraft:overworld`) > 0
+	return srv.runCommandSilent(`execute in minecraft:overworld if entity @a[name=${name},distance=0..]`) > 0
 }
 
 function raidPlayerPos(srv, name) {
@@ -203,14 +204,17 @@ ItemEvents.rightClicked(event => {
 	let name = event.player.username
 	event.cancel()
 	if (raidRadioUsed[name] != null && raidTicks - raidRadioUsed[name] < RAID_RADIO_COOLDOWN) {
+		console.info(`air_raid radio: ${name} — кулдаун`)
 		srv.runCommandSilent(`tellraw ${name} {"text":"Рация перегрета. Подожди минуту.","color":"gray"}`)
 		return
 	}
 	if (!raidOnlineOverworld(srv, name)) {
+		console.info(`air_raid radio: ${name} — не в верхнем мире`)
 		srv.runCommandSilent(`tellraw ${name} {"text":"Нет связи с авиацией.","color":"gray"}`)
 		return
 	}
 	if (!raidAhead(srv, name)) {
+		console.info(`air_raid radio: ${name} — отказ, задевает базу`)
 		srv.runCommandSilent(`tellraw ${name} {"text":"[Пилот] Отказ: цель слишком близко к базе. Разверни наводку.","color":"gold"}`)
 		return
 	}
@@ -248,7 +252,9 @@ ServerEvents.commandRegistry(event => {
 		// диагностика: как скрипт видит предмет в главной руке (в лог)
 		.then(Commands.literal('debugitem').executes(ctx => {
 			let p = ctx.source.player
-			console.info('air_raid debugitem: ' + p.username + ' ' + raidDescribeItem(p.mainHandItem))
+			let n = p.username
+			console.info('air_raid debugitem: ' + n + ' ' + raidDescribeItem(p.mainHandItem))
+			console.info(`air_raid debugitem: ${n} overworld(new)=${raidOnlineOverworld(Utils.server, n)} oldDimCheck=${Utils.server.runCommandSilent(`execute as ${n} at @s if dimension minecraft:overworld`)} cooldownLeft=${raidRadioUsed[n] != null ? RAID_RADIO_COOLDOWN - (raidTicks - raidRadioUsed[n]) : 0}`)
 			return 1
 		}))
 		// выдать рацию авиаудара
